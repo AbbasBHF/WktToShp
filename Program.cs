@@ -1,11 +1,17 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace WktToShp
 {
     class Program
     {
+        private readonly static int GeometryCollectionLength = "GEOMETRYCOLLECTION".Length + 1;
+
         static void Main(string[] args)
         {
             if (args.Length < 1)
@@ -26,10 +32,175 @@ namespace WktToShp
             MainAsync(args).Wait();
         }
 
+        private static async Task Directory(string path, string[] args)
+        {
+            var count = 1;
+            var errorsCount = 1;
+            var files = new DirectoryInfo(path).GetFiles("*.wkt");
+            Console.WriteLine($"Total items: {files.Length}");
+            var top = Console.CursorTop;
+            Console.WriteLine("Converted items: 0");
+            var errorsTop = Console.CursorTop;
+            Console.WriteLine("Errors: 0");
+            foreach (var item in files)
+            {
+                var process = new Process();
+                var arg = new[] { $"\"{item.Name}\"" }.Concat(args).ToArray();
+                process.StartInfo = new ProcessStartInfo("WktToShp.exe", $"{string.Join(" ", arg)}")
+                {
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    WorkingDirectory = path
+                };
+
+                var hasErrors = new List<string>();
+
+                process.ErrorDataReceived += async (sender, e) =>
+                {
+                    if (e.Data != null)
+                    {
+                        hasErrors.Add(item.Name);
+                        await File.AppendAllTextAsync(Path.Combine(path, "errors.log"), $"{item.Name}: {e.Data}\n");
+                        Console.SetCursorPosition(8, errorsTop);
+                        Console.Write(errorsCount++);
+                    }
+                };
+
+                try
+                {
+                    process.Start();
+                    process.BeginErrorReadLine();
+                    await process.WaitForExitAsync();
+                }
+                catch (Exception exception)
+                {
+                    await File.AppendAllTextAsync(Path.Combine(path, "errors.log"), $"{item.Name}: {exception.Message}\n");
+                    Console.SetCursorPosition(8, errorsTop);
+                    Console.Write(errorsCount++);
+                }
+
+                if (!hasErrors.Contains(item.Name))
+                {
+                    item.Delete();
+                }
+
+                Console.SetCursorPosition(17, top);
+                Console.Write(count++);
+            }
+
+            Console.SetCursorPosition(0, errorsTop + 1);
+        }
+
+        private static async Task MultiTypeGeometryCollection(Shapes.GeometryCollection geometryCollection, string name, bool convert, int zoneNumber, char zoneLetter)
+        {
+            foreach (var group in geometryCollection.GroupedGeometries)
+            {
+                var shape = group.Value;
+                using var shp = File.OpenWrite($"{name}.{group.Key}.shp");
+
+                await shp.Write(9994, true);
+
+                for (var i = 0; i < 5; i++)
+                {
+                    await shp.Write(0, true);
+                }
+
+                await shp.Write(50 + shape.FullLength, true);
+                await shp.Write(1000, false);
+                await shp.Write((int)shape.Types[0], false);
+
+                if (convert)
+                {
+                    await shp.Write(shape.Box, zoneNumber, zoneLetter);
+                }
+                else
+                {
+                    await shp.Write(shape.Box);
+                }
+
+                for (var i = 0; i < 4; i++)
+                {
+                    await shp.Write(0.0, true);
+                }
+
+                for (int i = 0; i < shape.Count; i++)
+                {
+                    var geometry = shape.Geometries.ElementAt(i);
+                    if (convert)
+                    {
+                        await shp.Write(geometry, i + 1, zoneNumber, zoneLetter);
+                    }
+                    else
+                    {
+                        await shp.Write(geometry, i + 1);
+                    }
+                }
+            }
+        }
+
+        private static async Task GeometryCollection(string content, string shpFile, bool convert, int zoneNumber, char zoneLetter)
+        {
+            content = Regex.Replace(content, "^\\w+\\s*\\((.+)\\)$", "$1");
+            content = Regex.Replace(content, ",\\s*([a-zA-Z]+)", ";$1");
+            var shape = content.ParseGeometryCollection();
+            if (shape.Types.Length > 1)
+            {
+                await MultiTypeGeometryCollection(shape, shpFile[..^4], convert, zoneNumber, zoneLetter);
+                return;
+            }
+
+            using var shp = File.OpenWrite(shpFile);
+
+            await shp.Write(9994, true);
+
+            for (var i = 0; i < 5; i++)
+            {
+                await shp.Write(0, true);
+            }
+
+            await shp.Write(50 + shape.FullLength, true);
+            await shp.Write(1000, false);
+            await shp.Write((int)shape.Types[0], false);
+
+            if (convert)
+            {
+                await shp.Write(shape.Box, zoneNumber, zoneLetter);
+            }
+            else
+            {
+                await shp.Write(shape.Box);
+            }
+
+            for (var i = 0; i < 4; i++)
+            {
+                await shp.Write(0.0, true);
+            }
+
+            for (int i = 0; i < shape.Count; i++)
+            {
+                var geometry = shape.Geometries.ElementAt(i);
+                if (convert)
+                {
+                    await shp.Write(geometry, i + 1, zoneNumber, zoneLetter);
+                }
+                else
+                {
+                    await shp.Write(geometry, i + 1);
+                }
+            }
+        }
+
         private static Task MainAsync(string[] args)
             => Task.Run(async () =>
             {
                 var source = args[0];
+                var attrs = File.GetAttributes(source);
+                if (attrs.HasFlag(FileAttributes.Directory))
+                {
+                    await Directory(source, args.Skip(1).ToArray());
+                    return;
+                }
+
                 var convert = false;
                 var zoneNumber = 0;
                 var zoneLetter = '0';
@@ -75,9 +246,10 @@ namespace WktToShp
                 }
 
                 var content = await File.ReadAllTextAsync(source);
+                content = content.Trim();
                 if (content.StartsWith("GEOMETRYCOLLECTION"))
                 {
-                    await Console.Error.WriteLineAsync("'GEOMETRYCOLLECTION' is not supported");
+                    await GeometryCollection(content, shpFile, convert, zoneNumber, zoneLetter);
                     return;
                 }
 
@@ -87,7 +259,7 @@ namespace WktToShp
                     return;
                 }
 
-                var shape = content.Trim().ParseShape();
+                var shape = content.ParseShape();
 
                 using var shp = File.OpenWrite(shpFile);
 

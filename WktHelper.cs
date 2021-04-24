@@ -99,6 +99,17 @@ namespace WktToShp
                 Polygons = polygons.ToArray()
             };
         }
+        public static Shapes.GeometryCollection ParseGeometryCollection(this string str)
+        {
+            var res = new Shapes.GeometryCollection();
+
+            foreach (var item in str.Split(';'))
+            {
+                res.Geometries.Add(item.ParseShape());
+            }
+
+            return res;
+        }
 
         public static Shapes.Shape ParseShape(this string str)
         {
@@ -120,7 +131,7 @@ namespace WktToShp
         {
             if (points?.Length < 1)
             {
-                throw new ArgumentNullException("points");
+                throw new ArgumentNullException(nameof(points));
             }
 
             double? minX = null,
@@ -153,7 +164,7 @@ namespace WktToShp
         {
             if (polygons?.Length < 1)
             {
-                throw new ArgumentNullException("points");
+                throw new ArgumentNullException(nameof(polygons));
             }
 
             double? minX = null,
@@ -162,6 +173,41 @@ namespace WktToShp
                 maxY = null;
 
             foreach (var item in polygons)
+            {
+                if (minX == null)
+                {
+                    minX = item.Box.Min.Longitude;
+                    minY = item.Box.Min.Latitude;
+                    maxX = item.Box.Max.Longitude;
+                    maxY = item.Box.Max.Latitude;
+                }
+                else
+                {
+                    minX = item.Box.Min.Longitude < minX ? item.Box.Min.Longitude : minX;
+                    minY = item.Box.Min.Latitude < minY ? item.Box.Min.Latitude : minY;
+                    maxX = item.Box.Max.Longitude > maxX ? item.Box.Max.Longitude : maxX;
+                    maxY = item.Box.Max.Latitude > maxY ? item.Box.Max.Latitude : maxY;
+                }
+            }
+
+            return new Box(
+                new Types.Point(minX.Value, minY.Value),
+                new Types.Point(maxX.Value, maxY.Value)
+            );
+        }
+        public static Types.Box CalculateBox(this ICollection<Shapes.Shape> geometries)
+        {
+            if (geometries?.Count < 1)
+            {
+                throw new ArgumentNullException("geometries");
+            }
+
+            double? minX = null,
+                minY = null,
+                maxX = null,
+                maxY = null;
+
+            foreach (var item in geometries)
             {
                 if (minX == null)
                 {
